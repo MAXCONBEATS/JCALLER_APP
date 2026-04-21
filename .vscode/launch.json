@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "JCaller Server (Dart)",
+            "type": "dart",
+            "request": "launch",
+            "program": "${workspaceFolder}/jcaller_core/bin/server.dart",
+            "cwd": "${workspaceFolder}/jcaller_core",
+            "console": "terminal",
+            "dartSdkPath": "C:\\flutter\\bin\\cache\\dart-sdk",
+            "flutterMode": "none"
+        },
+        {
+            "name": "JCaller App (Flutter)",
+            "type": "dart",
+            "request": "launch",
+            "program": "${workspaceFolder}/jcaller_app/lib/main.dart",
+            "cwd": "${workspaceFolder}/jcaller_app",
+            "console": "terminal"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "JCaller Full",
+            "configurations": ["JCaller Server (Dart)", "JCaller App (Flutter)"]
+        }
+    ]
+}

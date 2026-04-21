@@ -1,0 +1,11 @@
+{
+    "dart.openDevTools": "never",
+    "dart.debugExternalLibraries": false,
+    "dart.debugSdkLibraries": false,
+    "search.exclude": {
+        "**/jcaller_app": true
+    },
+    "files.exclude": {
+        "**/jcaller_app": true
+    }
+}
