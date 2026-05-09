@@ -38,9 +38,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            TextField(controller: _usernameController, decoration: const InputDecoration(labelText: 'Username')),
+            TextField(
+                controller: _usernameController,
+                decoration: const InputDecoration(labelText: 'Username')),
             const SizedBox(height: 12),
-            TextField(controller: _passwordController, decoration: const InputDecoration(labelText: 'Password'), obscureText: true),
+            TextField(
+                controller: _passwordController,
+                decoration: const InputDecoration(labelText: 'Password'),
+                obscureText: true),
             const SizedBox(height: 24),
             ElevatedButton(
               onPressed: authState.isLoading
@@ -49,14 +54,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       final username = _usernameController.text.trim();
                       final password = _passwordController.text.trim();
                       if (username.isNotEmpty && password.isNotEmpty) {
-                        ref.read(authNotifierProvider.notifier).login(username, password);
+                        ref
+                            .read(authNotifierProvider.notifier)
+                            .login(username, password);
                       }
                     },
-              child: authState.isLoading ? const CircularProgressIndicator() : const Text('Login'),
+              child: authState.isLoading
+                  ? const CircularProgressIndicator()
+                  : const Text('Login'),
             ),
             TextButton(
               onPressed: () {
-                // перейти на экран регистрации
+                Navigator.pushNamed(context, '/register');
               },
               child: const Text('Create account'),
             ),

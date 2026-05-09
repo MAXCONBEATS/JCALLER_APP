@@ -18,7 +18,6 @@ class SignalingService {
     _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
     _isConnected = true;
 
-    // Подписка на входящие сообщения
     _channel!.stream.listen(
       (raw) {
         try {
@@ -38,7 +37,6 @@ class SignalingService {
       },
     );
 
-    // Регистрация
     _send({'type': 'register', 'userId': userId});
   }
 
@@ -60,6 +58,11 @@ class SignalingService {
 
   void sendIceCandidate(String targetId, Map<String, dynamic> candidate) {
     _send({'type': 'ice-candidate', 'targetId': targetId, 'candidate': candidate});
+  }
+
+  // Добавленный метод для завершения звонка
+  void sendCallEnd(String targetId) {
+    _send({'type': 'call-ended', 'targetId': targetId});
   }
 
   void disconnect() {

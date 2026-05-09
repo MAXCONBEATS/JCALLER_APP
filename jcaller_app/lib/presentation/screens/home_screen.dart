@@ -6,6 +6,7 @@ import 'package:jcaller_app/presentation/providers/current_user_provider.dart';
 import 'package:jcaller_app/presentation/providers/signaling_provider.dart';
 import 'package:jcaller_app/presentation/providers/online_users_provider.dart';
 import 'package:jcaller_app/presentation/providers/users_provider.dart';
+import 'package:jcaller_app/presentation/providers/call_provider.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -98,11 +99,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 title: Text(user['username'] ?? 'Unknown'),
                 subtitle: Text(isOnline ? 'Online' : 'Offline'),
                 trailing: IconButton(
-                  icon: const Icon(Icons.call),
-                  onPressed: isOnline
-                      ? () => _startCall(userId, user['username'] ?? 'User')
-                      : null,
-                ),
+  icon: const Icon(Icons.call),
+  onPressed: () => _startCall(userId, user['username'] ?? 'User'),
+),
               );
             },
           );
@@ -111,19 +110,34 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  void _startCall(String targetUserId, String targetUsername) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Call $targetUsername'),
-        content: const Text('WebRTC звонок будет реализован в следующем шаге'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
+  void _startCall(String targetUserId, String targetUsername) async {
+  // Убеждаемся, что WebSocket готов
+  if (!_webSocketInitialized) {
+    await _initializeWebSocket();
+  }
+  final signaling = ref.read(signalingServiceNotifierProvider);
+  if (signaling == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('WebSocket not connected')),
+    );
+    return;
+  }
+  final currentUser = ref.read(currentUserProvider).valueOrNull;
+  if (currentUser == null) return;
+  
+  final callManagerNotifier = ref.read(callManagerNotifierProvider.notifier);
+  await callManagerNotifier.initialize(currentUser.id);
+  callManagerNotifier.startCall(targetUserId);
+  
+  if (mounted) {
+    Navigator.pushNamed(
+      context,
+      '/call',
+      arguments: {
+        'targetUserId': targetUserId,
+        'targetUsername': targetUsername,
+      },
     );
   }
+}
 }
