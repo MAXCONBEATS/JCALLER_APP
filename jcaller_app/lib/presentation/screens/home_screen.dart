@@ -49,8 +49,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
     await ref.read(authNotifierProvider.notifier).logout();
     if (mounted) {
-  Navigator.of(context).pushReplacementNamed('/home');
-}
+      Navigator.of(context).pushReplacementNamed('/home');
+    }
   }
 
   @override
@@ -79,12 +79,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
       body: usersAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (err, _) => Center(child: Text('Error: $err')),
+        error: (err, _) {
+          final message = err.toString();
+          if (message.contains('сессия истекла')) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              ref
+                  .read(authNotifierProvider.notifier)
+                  .logout(showMessage: false);
+            });
+            return const Center(
+                child: Text('Сессия истекла. Перенаправление...'));
+          }
+          return Center(child: Text('Ошибка: $err'));
+        },
         data: (users) {
           if (users.isEmpty) return const Center(child: Text('No users found'));
           final currentUser = currentUserAsync.valueOrNull;
-          if (currentUser == null) return const Center(child: CircularProgressIndicator());
-          final filtered = users.where((u) => u['id'] != currentUser.id).toList();
+          if (currentUser == null)
+            return const Center(child: CircularProgressIndicator());
+          final filtered =
+              users.where((u) => u['id'] != currentUser.id).toList();
           return ListView.builder(
             itemCount: filtered.length,
             itemBuilder: (context, index) {
@@ -94,14 +108,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               return ListTile(
                 leading: CircleAvatar(
                   backgroundColor: isOnline ? Colors.green : Colors.grey,
-                  child: Icon(isOnline ? Icons.circle : Icons.circle_outlined, color: Colors.white),
+                  child: Icon(isOnline ? Icons.circle : Icons.circle_outlined,
+                      color: Colors.white),
                 ),
                 title: Text(user['username'] ?? 'Unknown'),
                 subtitle: Text(isOnline ? 'Online' : 'Offline'),
                 trailing: IconButton(
-  icon: const Icon(Icons.call),
-  onPressed: () => _startCall(userId, user['username'] ?? 'User'),
-),
+                  icon: const Icon(Icons.call),
+                  onPressed: () =>
+                      _startCall(userId, user['username'] ?? 'User'),
+                ),
               );
             },
           );
@@ -111,33 +127,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _startCall(String targetUserId, String targetUsername) async {
-  // Убеждаемся, что WebSocket готов
-  if (!_webSocketInitialized) {
-    await _initializeWebSocket();
+    // Убеждаемся, что WebSocket готов
+    if (!_webSocketInitialized) {
+      await _initializeWebSocket();
+    }
+    final signaling = ref.read(signalingServiceNotifierProvider);
+    if (signaling == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('WebSocket not connected')),
+      );
+      return;
+    }
+    final currentUser = ref.read(currentUserProvider).valueOrNull;
+    if (currentUser == null) return;
+
+    final callManagerNotifier = ref.read(callManagerNotifierProvider.notifier);
+    await callManagerNotifier.initialize(currentUser.id);
+    callManagerNotifier.startCall(targetUserId);
+
+    if (mounted) {
+      Navigator.pushNamed(
+        context,
+        '/call',
+        arguments: {
+          'targetUserId': targetUserId,
+          'targetUsername': targetUsername,
+        },
+      );
+    }
   }
-  final signaling = ref.read(signalingServiceNotifierProvider);
-  if (signaling == null) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('WebSocket not connected')),
-    );
-    return;
-  }
-  final currentUser = ref.read(currentUserProvider).valueOrNull;
-  if (currentUser == null) return;
-  
-  final callManagerNotifier = ref.read(callManagerNotifierProvider.notifier);
-  await callManagerNotifier.initialize(currentUser.id);
-  callManagerNotifier.startCall(targetUserId);
-  
-  if (mounted) {
-    Navigator.pushNamed(
-      context,
-      '/call',
-      arguments: {
-        'targetUserId': targetUserId,
-        'targetUsername': targetUsername,
-      },
-    );
-  }
-}
 }

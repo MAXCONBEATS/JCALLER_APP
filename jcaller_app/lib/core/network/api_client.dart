@@ -29,11 +29,11 @@ class ApiClient {
 
   dynamic _handleResponse(http.Response response) {
     if (response.statusCode >= 200 && response.statusCode < 300) {
-      final decoded = jsonDecode(response.body);
-      // Может быть Map или List
-      return decoded;
+      return jsonDecode(response.body);
+    } else if (response.statusCode == 401) {
+      throw Exception('Ваша сессия истекла. Пожалуйста, войдите снова.');
     } else {
-      throw Exception('Request failed: ${response.statusCode} - ${response.body}');
+      throw Exception('Ошибка: ${response.statusCode} - ${response.body}');
     }
   }
 }

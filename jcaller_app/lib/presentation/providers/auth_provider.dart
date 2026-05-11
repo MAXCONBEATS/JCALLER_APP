@@ -2,12 +2,14 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:jcaller_app/core/network/api_client.dart';
 import 'package:jcaller_app/data/services/auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/material.dart';
 
 part 'auth_provider.g.dart';
+// Глобальный доступ к navigatorKey (можно поместить в отдельный файл)
+final rootNavigatorKey = GlobalKey<NavigatorState>();
 
 @riverpod
 Future<ApiClient> apiClient(ApiClientRef ref) async {
-  // Замените IP на адрес вашего сервера
   return ApiClient(baseUrl: 'http://localhost:8081');
 }
 
@@ -19,6 +21,8 @@ Future<AuthService> authService(AuthServiceRef ref) async {
 
 @riverpod
 class AuthNotifier extends _$AuthNotifier {
+  final GlobalKey<NavigatorState> navigatorKey = GlobalKey();
+
   @override
   Future<String?> build() async {
     final prefs = await SharedPreferences.getInstance();
@@ -39,9 +43,24 @@ class AuthNotifier extends _$AuthNotifier {
     }
   }
 
-  Future<void> logout() async {
+  Future<void> logout({bool showMessage = true}) async {
+    if (showMessage) {
+      _showSnackBar('Сессия завершена. Пожалуйста, войдите снова.');
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('token');
     state = const AsyncData(null);
+    // Перенаправляем на главный экран (логин)
+    navigatorKey.currentState?.pushNamedAndRemoveUntil('/', (route) => false);
+  }
+
+  void _showSnackBar(String message) {
+    final context = navigatorKey.currentContext;
+    if (context != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    }
   }
 }
+
