@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:jcaller_app/data/services/websocket_service.dart';
 
@@ -11,32 +12,47 @@ enum CallState {
 }
 
 class CallManager {
-  final SignalingService _signaling;
-  final String _myUserId;
+  SignalingService _signaling;
   String? _remoteUserId;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   CallState _state = CallState.idle;
+  final List<Map<String, dynamic>> _pendingIceCandidates = [];
 
   final _stateController = StreamController<CallState>.broadcast();
-  final _incomingCallController = StreamController<Map<String, dynamic>>.broadcast();
+  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
-  CallManager(this._signaling, this._myUserId) {
-    _signaling.onMessage.listen(_handleSignalingMessage);
+  CallManager(this._signaling) {
+    _initRenderer();
+  }
+
+  void updateSignaling(SignalingService signaling) {
+    _signaling = signaling;
   }
 
   CallState get state => _state;
-  Stream<CallState> get onStateChange => _stateController.stream;
-  Stream<Map<String, dynamic>> get onIncomingCall => _incomingCallController.stream;
+
+  /// Сразу отдаёт текущий статус, затем все изменения (важно для принявшего звонок).
+  Stream<CallState> get onStateChange async* {
+    yield _state;
+    yield* _stateController.stream;
+  }
+  RTCVideoRenderer get remoteRenderer => _remoteRenderer;
+
+  Future<void> _initRenderer() async {
+    await _remoteRenderer.initialize();
+  }
 
   void _setState(CallState newState) {
     _state = newState;
     _stateController.add(newState);
   }
 
-  // Инициировать звонок
   Future<void> startCall(String remoteUserId) async {
-    if (_state != CallState.idle) return;
+    if (_state != CallState.idle) {
+      debugPrint('startCall ignored: state=$_state');
+      return;
+    }
     _remoteUserId = remoteUserId;
     _setState(CallState.ringing);
 
@@ -45,119 +61,210 @@ class CallManager {
 
     final offer = await _peerConnection!.createOffer();
     await _peerConnection!.setLocalDescription(offer);
-    _signaling.sendOffer(remoteUserId, offer.toMap());
+    _signaling.sendOffer(remoteUserId, _sdpToMap(offer));
+    debugPrint('📤 Offer sent to $remoteUserId');
   }
 
-  // Ответить на входящий звонок
-  Future<void> acceptCall(Map<String, dynamic> offerData, String fromUserId) async {
-    if (_state != CallState.idle) return;
+  Future<void> acceptCall(
+      Map<String, dynamic> offerData, String fromUserId) async {
+    if (_state != CallState.idle) {
+      debugPrint('acceptCall ignored: state=$_state');
+      return;
+    }
     _remoteUserId = fromUserId;
     _setState(CallState.connecting);
 
     await _initPeerConnection();
     await _setupLocalStream();
 
-    final offer = RTCSessionDescription(offerData['sdp'], offerData['type']);
+    final offerMap =
+        (offerData['offer'] as Map<String, dynamic>?) ?? offerData;
+    final offer = RTCSessionDescription(
+      offerMap['sdp'] as String,
+      offerMap['type'] as String,
+    );
     await _peerConnection!.setRemoteDescription(offer);
+    await _flushPendingIceCandidates();
+
     final answer = await _peerConnection!.createAnswer();
     await _peerConnection!.setLocalDescription(answer);
-    _signaling.sendAnswer(fromUserId, answer.toMap());
+    _signaling.sendAnswer(fromUserId, _sdpToMap(answer));
     _setState(CallState.connected);
+    debugPrint('📤 Answer sent to $fromUserId');
   }
 
-  // Отклонить звонок (исходящий или входящий)
   void rejectCall() {
+    _notifyRemoteEnded();
     _cleanup();
-    _setState(CallState.ended);
+    _setState(CallState.idle);
   }
 
-  // Завершить активный звонок
   void endCall() {
+    _notifyRemoteEnded();
+    _cleanup();
+    _setState(CallState.idle);
+  }
+
+  void _notifyRemoteEnded() {
     if (_remoteUserId != null) {
       _signaling.sendCallEnd(_remoteUserId!);
     }
-    _cleanup();
-    _setState(CallState.ended);
+  }
+
+  Map<String, dynamic> _sdpToMap(RTCSessionDescription sdp) {
+    return {'sdp': sdp.sdp, 'type': sdp.type};
   }
 
   Future<void> _initPeerConnection() async {
     final config = {
-  'iceServers': [
-    {'urls': 'stun:stun.l.google.com:19302'},
-    {'urls': 'stun:stun1.l.google.com:19302'},
-  ],
-  'sdpSemantics': 'plan-b',
-};
+      'iceServers': [
+        {'urls': 'stun:stun.l.google.com:19302'},
+      ],
+    };
     _peerConnection = await createPeerConnection(config);
     _peerConnection!.onIceCandidate = (candidate) {
-      if (_remoteUserId != null && candidate != null) {
-        _signaling.sendIceCandidate(_remoteUserId!, candidate.toMap());
+      if (_remoteUserId != null && candidate.candidate != null) {
+        _signaling.sendIceCandidate(
+          _remoteUserId!,
+          {
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          },
+        );
       }
     };
     _peerConnection!.onTrack = (event) {
-      // Можно передать удалённый трек в UI
+      if (event.streams.isNotEmpty) {
+        _remoteRenderer.srcObject = event.streams.first;
+        debugPrint('Remote track received');
+      }
     };
-    _peerConnection!.onIceConnectionState = (state) {
-      print('ICE connection state: $state');
+    _peerConnection!.onIceConnectionState = (iceState) {
+      debugPrint('ICE connection state: $iceState');
+      if (iceState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        if (_state == CallState.ringing || _state == CallState.connecting) {
+          _setState(CallState.connected);
+        }
+      }
     };
   }
 
   Future<void> _setupLocalStream() async {
-  try {
-    _localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
-    print('✅ Local stream added');
-    _peerConnection?.addStream(_localStream!);
-  } catch (e) {
-    print('❌ Error getting microphone: $e');
+    try {
+      _localStream = await navigator.mediaDevices
+          .getUserMedia({'audio': true, 'video': false});
+      final audioTrack = _localStream!.getAudioTracks().first;
+      _peerConnection!.addTrack(audioTrack, _localStream!);
+      debugPrint('✅ Local audio track added');
+    } catch (e) {
+      debugPrint('❌ Error getting microphone: $e');
+    }
   }
-}
 
-  void _handleSignalingMessage(Map<String, dynamic> message) {
+  /// Все WS-сообщения звонка приходят сюда из [SignalingServiceNotifier].
+  void handleSignalingMessage(Map<String, dynamic> message) {
     final type = message['type'] as String?;
     switch (type) {
       case 'offer':
-        if (_state == CallState.idle) {
-          _incomingCallController.add(message);
-        }
+        _handleOffer(message);
         break;
       case 'answer':
-        if (_state == CallState.ringing || _state == CallState.connecting) {
-          _handleAnswer(message);
-        }
+        _handleAnswerMessage(message);
         break;
       case 'ice-candidate':
-        if (_peerConnection != null) {
-          final candidate = RTCIceCandidate(
-            message['candidate']['candidate'],
-            message['candidate']['sdpMid'],
-            message['candidate']['sdpMLineIndex'],
-          );
-          _peerConnection?.addCandidate(candidate);
-        }
+        _handleIceCandidate(message);
         break;
       case 'call-ended':
+        debugPrint('📴 Remote ended call');
         _cleanup();
-        _setState(CallState.ended);
+        _setState(CallState.idle);
         break;
     }
   }
 
-  Future<void> _handleAnswer(Map<String, dynamic> message) async {
-    final answer = RTCSessionDescription(message['answer']['sdp'], message['answer']['type']);
-    await _peerConnection?.setRemoteDescription(answer);
-    _setState(CallState.connected);
+  void _handleOffer(Map<String, dynamic> message) {
+    final from = message['from']?.toString();
+    if (from == null) return;
+
+    if (_state == CallState.idle) {
+      debugPrint('📞 Incoming offer from $from (handled by UI)');
+    } else {
+      debugPrint('📞 Offer ignored (state=$_state), busy to $from');
+      _signaling.sendCallEnd(from);
+    }
+  }
+
+  Future<void> _handleAnswerMessage(Map<String, dynamic> message) async {
+    if (_state != CallState.ringing && _state != CallState.connecting) {
+      debugPrint('Answer ignored: state=$_state');
+      return;
+    }
+    try {
+      final answerMap = message['answer'] as Map<String, dynamic>;
+      final answer = RTCSessionDescription(
+        answerMap['sdp'] as String,
+        answerMap['type'] as String,
+      );
+      await _peerConnection?.setRemoteDescription(answer);
+      await _flushPendingIceCandidates();
+      _setState(CallState.connected);
+      debugPrint('✅ Answer applied from ${message['from']}');
+    } catch (e) {
+      debugPrint('❌ Failed to apply answer: $e');
+    }
+  }
+
+  Future<void> _handleIceCandidate(Map<String, dynamic> message) async {
+    final candidateMap = message['candidate'] as Map<String, dynamic>?;
+    if (candidateMap == null) return;
+
+    if (_peerConnection == null ||
+        _state == CallState.idle ||
+        _state == CallState.ended) {
+      _pendingIceCandidates.add(candidateMap);
+      return;
+    }
+
+    await _addIceCandidate(candidateMap);
+  }
+
+  Future<void> _flushPendingIceCandidates() async {
+    if (_pendingIceCandidates.isEmpty) return;
+    final pending = List<Map<String, dynamic>>.from(_pendingIceCandidates);
+    _pendingIceCandidates.clear();
+    for (final c in pending) {
+      await _addIceCandidate(c);
+    }
+  }
+
+  Future<void> _addIceCandidate(Map<String, dynamic> candidateMap) async {
+    try {
+      final candidate = RTCIceCandidate(
+        candidateMap['candidate'] as String?,
+        candidateMap['sdpMid'] as String?,
+        candidateMap['sdpMLineIndex'] as int?,
+      );
+      await _peerConnection?.addCandidate(candidate);
+    } catch (e) {
+      debugPrint('ICE candidate error: $e');
+    }
   }
 
   void _cleanup() {
+    _pendingIceCandidates.clear();
     _localStream?.dispose();
+    _localStream = null;
     _peerConnection?.close();
     _peerConnection = null;
     _remoteUserId = null;
+    _remoteRenderer.srcObject = null;
   }
 
   void dispose() {
     _cleanup();
     _stateController.close();
-    _incomingCallController.close();
+    _remoteRenderer.dispose();
   }
 }

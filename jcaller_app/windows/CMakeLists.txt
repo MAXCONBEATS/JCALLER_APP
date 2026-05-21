@@ -2,6 +2,9 @@
 cmake_minimum_required(VERSION 3.14)
 project(jcaller_app LANGUAGES CXX)
 
+# Подавление ошибки experimental/coroutine для Visual Studio 18
+add_definitions(-D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
 set(BINARY_NAME "jcaller_app")

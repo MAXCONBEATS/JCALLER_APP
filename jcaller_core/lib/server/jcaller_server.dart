@@ -17,42 +17,44 @@ class JCallerServer {
   final Map<String, WebSocketChannel> _signalHandlers = {};
   final Map<String, List<CallRequest>> _pendingRequests = {};
   final Map<String, CallingSession> _activeSessions = {};
-  
+
   JCallerServer(this._userRepository);
-  
+
   Future<void> start({int port = 8080}) async {
-    
     final app = Router();
-    final swaggerHandler = SwaggerUI('specs/swagger_calls.yaml', title: 'JCaller Calls API');
-app.mount('/docs', swaggerHandler);
-    
+    final swaggerHandler =
+        SwaggerUI('specs/swagger_calls.yaml', title: 'JCaller Calls API');
+    app.mount('/docs', swaggerHandler);
+
     // Health check
     app.get('/health', _healthCheck);
-    
+
     // WebSocket for signaling
-    app.mount('/ws/signal', webSocketHandler((WebSocketChannel channel, {String? protocol}) {
+    app.mount('/ws/signal',
+        webSocketHandler((WebSocketChannel channel, {String? protocol}) {
       _handleSignalConnection(channel);
     }));
-    
+
     // Call management endpoints
     app.post('/api/calls/request', _createCallRequest);
     app.get('/api/calls/requests/<userId>', _getPendingRequests);
     app.post('/api/calls/accept/<requestId>', _acceptCall);
     app.post('/api/calls/reject/<requestId>', _rejectCall);
     app.post('/api/calls/end/<sessionId>', _endCall);
-    
+
     // Get online users (интеграция с UserApi)
     app.get('/api/online-users', _getOnlineUsers);
-    
+
     final handler = Pipeline()
         .addMiddleware(logRequests())
         .addMiddleware(_addCorsHeaders())
         .addHandler(app);
-    
+
     _server = await serve(handler, InternetAddress.anyIPv4, port);
-    developer.log('JCallerServer running on http://${_server.address.host}:${_server.port}');
+    developer.log(
+        'JCallerServer running on http://${_server.address.host}:${_server.port}');
   }
-  
+
   Middleware _addCorsHeaders() {
     return (Handler innerHandler) {
       return (Request request) async {
@@ -60,10 +62,11 @@ app.mount('/docs', swaggerHandler);
           return Response.ok(null, headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+            'Access-Control-Allow-Headers':
+                'Origin, Content-Type, Authorization',
           });
         }
-        
+
         final response = await innerHandler(request);
         return response.change(headers: {
           ...response.headers,
@@ -72,90 +75,127 @@ app.mount('/docs', swaggerHandler);
       };
     };
   }
-  
+
   // WebRTC Signaling
   void _handleSignalConnection(WebSocketChannel channel) {
     String? userId;
-    
+
     channel.stream.listen(
       (message) {
         final data = jsonDecode(message as String);
-        
-        switch (data['type']) {
+        final type = data['type'] as String?;
+
+        switch (type) {
           case 'register':
-            userId = data['userId'];
+            userId = data['userId'].toString();
             _signalHandlers[userId!] = channel;
             developer.log('User $userId registered for signaling');
+            _sendOnlineUsersTo(userId!);
             _broadcastUserList();
             break;
-            
+
           case 'offer':
-            final targetId = data['targetId'];
-            if (_signalHandlers.containsKey(targetId)) {
-              _signalHandlers[targetId]!.sink.add(jsonEncode({
-                'type': 'offer',
-                'from': userId,
-                'offer': data['offer'],
-              }));
-            }
-            break;
-            
           case 'answer':
-            final targetId = data['targetId'];
-            if (_signalHandlers.containsKey(targetId)) {
-              _signalHandlers[targetId]!.sink.add(jsonEncode({
-                'type': 'answer',
-                'from': userId,
-                'answer': data['answer'],
-              }));
-            }
-            break;
-            
           case 'ice-candidate':
-            final targetId = data['targetId'];
-            if (_signalHandlers.containsKey(targetId)) {
-              _signalHandlers[targetId]!.sink.add(jsonEncode({
-                'type': 'ice-candidate',
-                'from': userId,
-                'candidate': data['candidate'],
-              }));
+          case 'call-ended':
+            if (userId == null) {
+              developer.log('WS message before register: $type');
+              break;
             }
+            _forwardSignal(userId!, data);
             break;
         }
       },
       onDone: () {
-        if (userId != null) {
+        if (userId != null && identical(_signalHandlers[userId], channel)) {
           _signalHandlers.remove(userId);
           _broadcastUserList();
         }
       },
     );
   }
-  
-  void _broadcastUserList() {
-    final onlineUsers = _signalHandlers.keys.toList();
-    
-    for (var entry in _signalHandlers.entries) {
-      entry.value.sink.add(jsonEncode({
-        'type': 'users-online',
-        'users': onlineUsers.where((id) => id != entry.key).toList(),
-      }));
+
+  void _forwardSignal(String fromUserId, Map<String, dynamic> data) {
+    final type = data['type'] as String;
+    final targetId = data['targetId']?.toString();
+    if (targetId == null) return;
+
+    final targetChannel = _signalHandlers[targetId];
+    if (targetChannel == null) {
+      developer.log('$type target offline: $targetId (from $fromUserId)');
+      return;
+    }
+
+    final payload = <String, dynamic>{'type': type, 'from': fromUserId};
+    if (type == 'offer') {
+      payload['offer'] = data['offer'];
+    } else if (type == 'answer') {
+      payload['answer'] = data['answer'];
+    } else if (type == 'ice-candidate') {
+      payload['candidate'] = data['candidate'];
+    }
+
+    try {
+      targetChannel.sink.add(jsonEncode(payload));
+      developer.log('Forwarded $type from $fromUserId to $targetId');
+    } catch (e) {
+      developer.log('Forward $type failed: $e');
+      _signalHandlers.remove(targetId);
     }
   }
-  
+
+  void _sendOnlineUsersTo(String userId) {
+    final channel = _signalHandlers[userId];
+    if (channel == null) return;
+
+    final others =
+        _signalHandlers.keys.where((id) => id != userId).toList();
+    try {
+      channel.sink.add(jsonEncode({
+        'type': 'users-online',
+        'users': others,
+      }));
+    } catch (e) {
+      developer.log('Failed to send online list to $userId: $e');
+      _signalHandlers.remove(userId);
+    }
+  }
+
+  void _broadcastUserList() {
+    final onlineUsers = _signalHandlers.keys.toList();
+    final staleUsers = <String>[];
+
+    for (var entry in _signalHandlers.entries) {
+      try {
+        entry.value.sink.add(jsonEncode({
+          'type': 'users-online',
+          'users': onlineUsers.where((id) => id != entry.key).toList(),
+        }));
+      } catch (e) {
+        developer.log('Stale WS for ${entry.key}: $e');
+        staleUsers.add(entry.key);
+      }
+    }
+
+    for (final id in staleUsers) {
+      _signalHandlers.remove(id);
+    }
+  }
+
   // Health check
   Response _healthCheck(Request request) {
     return Response.ok(
-      jsonEncode({'status': 'healthy', 'timestamp': DateTime.now().toIso8601String()}),
+      jsonEncode(
+          {'status': 'healthy', 'timestamp': DateTime.now().toIso8601String()}),
       headers: {'Content-Type': 'application/json'},
     );
   }
-  
+
   // Get online users
   Future<Response> _getOnlineUsers(Request request) async {
     final onlineIds = _signalHandlers.keys.toList();
     final users = <Map<String, dynamic>>[];
-    
+
     for (final id in onlineIds) {
       final user = await _userRepository.getUser(id);
       if (user != null) {
@@ -164,19 +204,19 @@ app.mount('/docs', swaggerHandler);
         users.add(userJson);
       }
     }
-    
+
     return Response.ok(
       jsonEncode(users),
       headers: {'Content-Type': 'application/json'},
     );
   }
-  
+
   // Call management endpoints
   Future<Response> _createCallRequest(Request request) async {
     try {
       final payload = await request.readAsString();
       final json = jsonDecode(payload);
-      
+
       final callRequest = CallRequest(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         senderId: json['senderId'],
@@ -184,18 +224,18 @@ app.mount('/docs', swaggerHandler);
         createdAt: DateTime.now(),
         status: 'pending',
       );
-      
+
       _pendingRequests.putIfAbsent(callRequest.recipientId, () => []);
       _pendingRequests[callRequest.recipientId]!.add(callRequest);
-      
+
       // Уведомляем получателя через WebSocket если онлайн
       if (_signalHandlers.containsKey(callRequest.recipientId)) {
         _signalHandlers[callRequest.recipientId]!.sink.add(jsonEncode({
-          'type': 'incoming-call',
-          'request': callRequest.toJson(),
-        }));
+              'type': 'incoming-call',
+              'request': callRequest.toJson(),
+            }));
       }
-      
+
       return Response.ok(
         jsonEncode(callRequest.toJson()),
         headers: {'Content-Type': 'application/json'},
@@ -204,7 +244,7 @@ app.mount('/docs', swaggerHandler);
       return Response.badRequest(body: jsonEncode({'error': e.toString()}));
     }
   }
-  
+
   Future<Response> _getPendingRequests(Request request, String userId) async {
     final requests = _pendingRequests[userId] ?? [];
     return Response.ok(
@@ -212,13 +252,13 @@ app.mount('/docs', swaggerHandler);
       headers: {'Content-Type': 'application/json'},
     );
   }
-  
+
   Future<Response> _acceptCall(Request request, String requestId) async {
     for (var entry in _pendingRequests.entries) {
       final requestIndex = entry.value.indexWhere((r) => r.id == requestId);
       if (requestIndex != -1) {
         final callRequest = entry.value[requestIndex];
-        
+
         final session = CallingSession(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
           callerId: callRequest.senderId,
@@ -227,54 +267,54 @@ app.mount('/docs', swaggerHandler);
           durationSeconds: 0,
           status: CallStatus.connected,
         );
-        
+
         _activeSessions[session.id] = session;
         _pendingRequests[entry.key]!.removeAt(requestIndex);
-        
+
         if (_signalHandlers.containsKey(callRequest.senderId)) {
           _signalHandlers[callRequest.senderId]!.sink.add(jsonEncode({
-            'type': 'call-accepted',
-            'session': session.toJson(),
-          }));
+                'type': 'call-accepted',
+                'session': session.toJson(),
+              }));
         }
-        
+
         return Response.ok(
           jsonEncode(session.toJson()),
           headers: {'Content-Type': 'application/json'},
         );
       }
     }
-    
+
     return Response.notFound(jsonEncode({'error': 'Request not found'}));
   }
-  
+
   Future<Response> _rejectCall(Request request, String requestId) async {
     for (var entry in _pendingRequests.entries) {
       final requestIndex = entry.value.indexWhere((r) => r.id == requestId);
       if (requestIndex != -1) {
         final callRequest = entry.value[requestIndex];
         _pendingRequests[entry.key]!.removeAt(requestIndex);
-        
+
         if (_signalHandlers.containsKey(callRequest.senderId)) {
           _signalHandlers[callRequest.senderId]!.sink.add(jsonEncode({
-            'type': 'call-rejected',
-            'requestId': requestId,
-          }));
+                'type': 'call-rejected',
+                'requestId': requestId,
+              }));
         }
-        
+
         return Response.ok(jsonEncode({'message': 'Call rejected'}));
       }
     }
-    
+
     return Response.notFound(jsonEncode({'error': 'Request not found'}));
   }
-  
+
   Future<Response> _endCall(Request request, String sessionId) async {
     final session = _activeSessions[sessionId];
     if (session == null) {
       return Response.notFound(jsonEncode({'error': 'Session not found'}));
     }
-    
+
     final endedSession = CallingSession(
       id: session.id,
       callerId: session.callerId,
@@ -284,15 +324,15 @@ app.mount('/docs', swaggerHandler);
       durationSeconds: DateTime.now().difference(session.startTime).inSeconds,
       status: CallStatus.ended,
     );
-    
+
     _activeSessions.remove(sessionId);
-    
+
     return Response.ok(
       jsonEncode(endedSession.toJson()),
       headers: {'Content-Type': 'application/json'},
     );
   }
-  
+
   Future<void> stop() async {
     await _userRepository.dispose();
     await _server.close();

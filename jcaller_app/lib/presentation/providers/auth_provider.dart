@@ -1,16 +1,16 @@
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:jcaller_app/core/config/server_config.dart';
 import 'package:jcaller_app/core/network/api_client.dart';
 import 'package:jcaller_app/data/services/auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 
 part 'auth_provider.g.dart';
-// Глобальный доступ к navigatorKey (можно поместить в отдельный файл)
 final rootNavigatorKey = GlobalKey<NavigatorState>();
 
 @riverpod
 Future<ApiClient> apiClient(ApiClientRef ref) async {
-  return ApiClient(baseUrl: 'http://localhost:8081');
+  return ApiClient(baseUrl: ServerConfig.apiBaseUrl);
 }
 
 @riverpod

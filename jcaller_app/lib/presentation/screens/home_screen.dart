@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:jcaller_app/core/models/user.dart';
+import 'package:jcaller_app/core/config/server_config.dart';
 import 'package:jcaller_app/presentation/providers/auth_provider.dart';
 import 'package:jcaller_app/presentation/providers/current_user_provider.dart';
 import 'package:jcaller_app/presentation/providers/signaling_provider.dart';
 import 'package:jcaller_app/presentation/providers/online_users_provider.dart';
 import 'package:jcaller_app/presentation/providers/users_provider.dart';
 import 'package:jcaller_app/presentation/providers/call_provider.dart';
+import 'package:jcaller_app/webrtc/call_manager.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -16,40 +17,51 @@ class HomeScreen extends ConsumerStatefulWidget {
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  bool _webSocketInitialized = false;
-
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeWebSocket();
+      _connectSignalingAndCalls();
     });
   }
 
-  Future<void> _initializeWebSocket() async {
-    if (_webSocketInitialized) return;
-
+  Future<void> _connectSignalingAndCalls() async {
     final token = ref.read(authNotifierProvider).valueOrNull;
     if (token == null) return;
 
-    final currentUserState = ref.read(currentUserProvider);
-    final user = currentUserState.valueOrNull;
-    if (user == null) return;
+    try {
+      final user = await ref.read(currentUserProvider.future);
+      final signalingNotifier =
+          ref.read(signalingServiceNotifierProvider.notifier);
 
-    final wsUrl = 'ws://localhost:8080/ws/signal';
+      if (!signalingNotifier.isConnected) {
+        await signalingNotifier.connect(user.id, ServerConfig.wsSignalUrl);
+      }
+
+      await ref.read(callManagerNotifierProvider.notifier).initialize(user.id);
+    } catch (e) {
+      debugPrint('Signaling setup error: $e');
+    }
+  }
+
+  Future<bool> _ensureSignalingReady() async {
+    final signaling = ref.read(signalingServiceNotifierProvider);
     final notifier = ref.read(signalingServiceNotifierProvider.notifier);
-    await notifier.connect(user.id, wsUrl);
-    _webSocketInitialized = true;
+
+    if (signaling != null && notifier.isConnected) return true;
+
+    await _connectSignalingAndCalls();
+
+    final updated = ref.read(signalingServiceNotifierProvider);
+    return updated != null && notifier.isConnected;
   }
 
   Future<void> _logout() async {
-    final signaling = ref.read(signalingServiceNotifierProvider);
-    if (signaling != null) {
-      await ref.read(signalingServiceNotifierProvider.notifier).disconnect();
-    }
+    ref.read(callManagerNotifierProvider.notifier).disposeManager();
+    await ref.read(signalingServiceNotifierProvider.notifier).disconnect();
     await ref.read(authNotifierProvider.notifier).logout();
     if (mounted) {
-      Navigator.of(context).pushReplacementNamed('/home');
+      Navigator.of(context).pushReplacementNamed('/login');
     }
   }
 
@@ -59,6 +71,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final usersAsync = ref.watch(usersListProvider);
     final onlineUsers = ref.watch(onlineUsersProvider);
     final currentUserAsync = ref.watch(currentUserProvider);
+    // Держим signaling и call manager живыми, пока открыт Home
+    ref.watch(signalingServiceNotifierProvider);
+    ref.watch(callManagerNotifierProvider);
+
+    ref.listen(currentUserProvider, (prev, next) {
+      if (next.hasValue && next.value != null) {
+        _connectSignalingAndCalls();
+      }
+    });
 
     if (token == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -95,21 +116,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         data: (users) {
           if (users.isEmpty) return const Center(child: Text('No users found'));
           final currentUser = currentUserAsync.valueOrNull;
-          if (currentUser == null)
+          if (currentUser == null) {
             return const Center(child: CircularProgressIndicator());
+          }
           final filtered =
               users.where((u) => u['id'] != currentUser.id).toList();
           return ListView.builder(
             itemCount: filtered.length,
             itemBuilder: (context, index) {
               final user = filtered[index];
-              final userId = user['id'] as String;
+              final userId = user['id'].toString();
               final isOnline = onlineUsers.contains(userId);
               return ListTile(
                 leading: CircleAvatar(
                   backgroundColor: isOnline ? Colors.green : Colors.grey,
-                  child: Icon(isOnline ? Icons.circle : Icons.circle_outlined,
-                      color: Colors.white),
+                  child: Icon(
+                    isOnline ? Icons.circle : Icons.circle_outlined,
+                    color: Colors.white,
+                  ),
                 ),
                 title: Text(user['username'] ?? 'Unknown'),
                 subtitle: Text(isOnline ? 'Online' : 'Offline'),
@@ -126,24 +150,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  void _startCall(String targetUserId, String targetUsername) async {
-    // Убеждаемся, что WebSocket готов
-    if (!_webSocketInitialized) {
-      await _initializeWebSocket();
-    }
-    final signaling = ref.read(signalingServiceNotifierProvider);
-    if (signaling == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('WebSocket not connected')),
-      );
+  Future<void> _startCall(String targetUserId, String targetUsername) async {
+    final ready = await _ensureSignalingReady();
+    if (!ready) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WebSocket not connected')),
+        );
+      }
       return;
     }
-    final currentUser = ref.read(currentUserProvider).valueOrNull;
-    if (currentUser == null) return;
 
-    final callManagerNotifier = ref.read(callManagerNotifierProvider.notifier);
-    await callManagerNotifier.initialize(currentUser.id);
-    callManagerNotifier.startCall(targetUserId);
+    final currentUser = await ref.read(currentUserProvider.future);
+    final callNotifier = ref.read(callManagerNotifierProvider.notifier);
+    final manager = ref.read(callManagerNotifierProvider);
+
+    if (manager == null || manager.state != CallState.idle) {
+      await callNotifier.initialize(currentUser.id);
+    } else {
+      callNotifier.updateSignaling(
+        ref.read(signalingServiceNotifierProvider)!,
+      );
+    }
+    await callNotifier.startCall(targetUserId);
 
     if (mounted) {
       Navigator.pushNamed(

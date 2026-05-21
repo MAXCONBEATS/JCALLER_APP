@@ -1,43 +1,98 @@
-import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/status.dart' as status;
 import 'dart:async';
 import 'dart:convert';
 
 class SignalingService {
-  WebSocketChannel? _channel;
+  IOWebSocketChannel? _channel;
   String? _userId;
+  String? _wsUrl;
   bool _isConnected = false;
+  bool _disposed = false;
+  bool _manualDisconnect = false;
+  Timer? _reconnectTimer;
+  StreamSubscription? _streamSubscription;
 
-  StreamController<Map<String, dynamic>> _messageController =
-      StreamController.broadcast();
+  StreamController<Map<String, dynamic>>? _messageController;
 
-  Stream<Map<String, dynamic>> get onMessage => _messageController.stream;
+  Stream<Map<String, dynamic>> get onMessage {
+    _ensureMessageController();
+    return _messageController!.stream;
+  }
 
-  void connect(String userId, String wsUrl) {
+  void _ensureMessageController() {
+    if (_messageController == null || _messageController!.isClosed) {
+      _messageController = StreamController<Map<String, dynamic>>.broadcast();
+    }
+  }
+
+  Future<void> connect(String userId, String wsUrl) async {
+    _disposed = false;
+    _manualDisconnect = false;
     _userId = userId;
-    _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
-    _isConnected = true;
+    _wsUrl = wsUrl;
+    await _doConnect();
+  }
 
-    _channel!.stream.listen(
-      (raw) {
-        try {
-          final data = jsonDecode(raw) as Map<String, dynamic>;
-          _messageController.add(data);
-        } catch (e) {
-          print('JSON decode error: $e');
-        }
-      },
-      onError: (error) {
-        print('WebSocket error: $error');
-        _isConnected = false;
-      },
-      onDone: () {
-        print('WebSocket closed');
-        _isConnected = false;
-      },
-    );
+  Future<void> _doConnect() async {
+    if (_disposed || _manualDisconnect) return;
 
-    _send({'type': 'register', 'userId': userId});
+    _reconnectTimer?.cancel();
+    await _streamSubscription?.cancel();
+    _streamSubscription = null;
+
+    try {
+      await _channel?.sink.close(status.goingAway);
+    } catch (_) {}
+    _channel = null;
+    _isConnected = false;
+
+    try {
+      _ensureMessageController();
+      _channel = IOWebSocketChannel.connect(Uri.parse(_wsUrl!));
+      await _channel!.ready;
+      _isConnected = true;
+
+      _streamSubscription = _channel!.stream.listen(
+        (raw) {
+          if (_messageController == null || _messageController!.isClosed) return;
+          try {
+            final data = jsonDecode(raw as String) as Map<String, dynamic>;
+            _messageController!.add(data);
+          } catch (e) {
+            print('JSON decode error: $e');
+          }
+        },
+        onError: (error) {
+          print('WebSocket error: $error');
+          _isConnected = false;
+          _scheduleReconnect();
+        },
+        onDone: () {
+          print('WebSocket closed');
+          _isConnected = false;
+          _scheduleReconnect();
+        },
+      );
+
+      _send({'type': 'register', 'userId': _userId});
+    } catch (e) {
+      print('WebSocket connect failed: $e');
+      _isConnected = false;
+      _scheduleReconnect();
+    }
+  }
+
+  void _scheduleReconnect() {
+    if (_manualDisconnect || _disposed || _reconnectTimer != null) return;
+    _reconnectTimer = Timer(const Duration(seconds: 3), () {
+      _reconnectTimer = null;
+      if (_manualDisconnect || _disposed) return;
+      print('Attempting to reconnect WebSocket...');
+      if (_userId != null && _wsUrl != null) {
+        _doConnect();
+      }
+    });
   }
 
   void _send(Map<String, dynamic> message) {
@@ -57,24 +112,36 @@ class SignalingService {
   }
 
   void sendIceCandidate(String targetId, Map<String, dynamic> candidate) {
-    _send({'type': 'ice-candidate', 'targetId': targetId, 'candidate': candidate});
+    _send({
+      'type': 'ice-candidate',
+      'targetId': targetId,
+      'candidate': candidate,
+    });
   }
 
-  // Добавленный метод для завершения звонка
   void sendCallEnd(String targetId) {
     _send({'type': 'call-ended', 'targetId': targetId});
   }
 
-  void disconnect() {
+  Future<void> disconnect() async {
+    _manualDisconnect = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _isConnected = false;
-    _channel?.sink.close(status.normalClosure);
+    await _streamSubscription?.cancel();
+    _streamSubscription = null;
+    try {
+      await _channel?.sink.close(status.normalClosure);
+    } catch (_) {}
     _channel = null;
   }
 
   bool get isConnected => _isConnected;
 
-  void dispose() {
-    disconnect();
-    _messageController.close();
+  Future<void> dispose() async {
+    _disposed = true;
+    await disconnect();
+    await _messageController?.close();
+    _messageController = null;
   }
 }
