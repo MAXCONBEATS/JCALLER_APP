@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:jcaller_app/data/services/websocket_service.dart';
 
 enum CallState {
@@ -16,6 +17,7 @@ class CallManager {
   String? _remoteUserId;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+  MediaStream? _remoteAudioStream;
   CallState _state = CallState.idle;
   final List<Map<String, dynamic>> _pendingIceCandidates = [];
 
@@ -120,8 +122,21 @@ class CallManager {
       'iceServers': [
         {'urls': 'stun:stun.l.google.com:19302'},
       ],
+      'sdpSemantics': 'unified-plan',
     };
-    _peerConnection = await createPeerConnection(config);
+    final constraints = {
+      'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': false},
+      'optional': [
+        {'DtlsSrtpKeyAgreement': true},
+      ],
+    };
+    _peerConnection = await createPeerConnection(config, constraints);
+    await _peerConnection!.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(
+        direction: TransceiverDirection.RecvOnly,
+      ),
+    );
     _peerConnection!.onIceCandidate = (candidate) {
       if (_remoteUserId != null && candidate.candidate != null) {
         _signaling.sendIceCandidate(
@@ -137,7 +152,10 @@ class CallManager {
     _peerConnection!.onTrack = (event) {
       if (event.streams.isNotEmpty) {
         _remoteRenderer.srcObject = event.streams.first;
-        debugPrint('Remote track received');
+        debugPrint('Remote track received (stream-based)');
+      } else if (event.track.kind == 'audio') {
+        _attachTrackWithoutStream(event.track);
+        debugPrint('Remote audio track received (track-only)');
       }
     };
     _peerConnection!.onIceConnectionState = (iceState) {
@@ -153,8 +171,21 @@ class CallManager {
 
   Future<void> _setupLocalStream() async {
     try {
+      final micStatus = await Permission.microphone.request();
+      if (!micStatus.isGranted) {
+        throw Exception('Microphone permission denied');
+      }
+
       _localStream = await navigator.mediaDevices
-          .getUserMedia({'audio': true, 'video': false});
+          .getUserMedia({
+        'audio': {
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
+          'channelCount': 1,
+        },
+        'video': false,
+      });
       final audioTrack = _localStream!.getAudioTracks().first;
       _peerConnection!.addTrack(audioTrack, _localStream!);
       debugPrint('✅ Local audio track added');
@@ -252,6 +283,13 @@ class CallManager {
     }
   }
 
+  Future<void> _attachTrackWithoutStream(MediaStreamTrack track) async {
+    _remoteAudioStream?.dispose();
+    _remoteAudioStream = await createLocalMediaStream('remote-audio');
+    _remoteAudioStream!.addTrack(track);
+    _remoteRenderer.srcObject = _remoteAudioStream;
+  }
+
   void _cleanup() {
     _pendingIceCandidates.clear();
     _localStream?.dispose();
@@ -260,6 +298,8 @@ class CallManager {
     _peerConnection = null;
     _remoteUserId = null;
     _remoteRenderer.srcObject = null;
+    _remoteAudioStream?.dispose();
+    _remoteAudioStream = null;
   }
 
   void dispose() {

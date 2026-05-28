@@ -29,7 +29,7 @@ class SignalingService {
   Future<void> connect(String userId, String wsUrl) async {
     _disposed = false;
     _manualDisconnect = false;
-    _userId = userId;
+    _userId = userId.trim();
     _wsUrl = wsUrl;
     await _doConnect();
   }

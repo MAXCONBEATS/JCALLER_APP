@@ -69,8 +69,10 @@ class SignalingServiceNotifier extends _$SignalingServiceNotifier {
 
     switch (type) {
       case 'users-online':
+        final myId = _connectedUserId;
         final users = (message['users'] as List<dynamic>? ?? [])
-            .map((e) => e.toString())
+            .map((e) => e.toString().trim())
+            .where((id) => id.isNotEmpty && id != myId)
             .toList();
         ref.read(onlineUsersProvider.notifier).update(users);
         break;

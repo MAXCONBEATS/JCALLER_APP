@@ -119,6 +119,10 @@ class JCallerServer {
     final type = data['type'] as String;
     final targetId = data['targetId']?.toString();
     if (targetId == null) return;
+    if (targetId == fromUserId) {
+      developer.log('Blocked self-targeted $type for user $fromUserId');
+      return;
+    }
 
     final targetChannel = _signalHandlers[targetId];
     if (targetChannel == null) {

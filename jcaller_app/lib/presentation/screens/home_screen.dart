@@ -119,8 +119,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           if (currentUser == null) {
             return const Center(child: CircularProgressIndicator());
           }
-          final filtered =
-              users.where((u) => u['id'] != currentUser.id).toList();
+          final currentUserId = currentUser.id.toString();
+          final filtered = users
+              .where((u) => (u['id']?.toString() ?? '') != currentUserId)
+              .toList();
           return ListView.builder(
             itemCount: filtered.length,
             itemBuilder: (context, index) {
@@ -162,6 +164,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
 
     final currentUser = await ref.read(currentUserProvider.future);
+    final myId = currentUser.id.toString();
+    if (targetUserId.toString() == myId) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Нельзя звонить самому себе')),
+        );
+      }
+      return;
+    }
+
     final callNotifier = ref.read(callManagerNotifierProvider.notifier);
     final manager = ref.read(callManagerNotifierProvider);
 
